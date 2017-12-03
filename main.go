@@ -4,22 +4,8 @@ import (
 	"flag"
 	watcher "github.com/dailing/dsync/fsnotify"
 	"github.com/dailing/levlog"
+	"time"
 )
-
-type Sender interface {
-	send(file string) error
-}
-
-type EventFilter interface {
-	Filter(events chan watcher.Event) chan watcher.Event
-}
-
-type IDEFilter struct{}
-
-func (IDEFilter) Filter(events chan watcher.Event) chan watcher.Event {
-	return events
-}
-
 
 func main() {
 	var listenPort int64
@@ -29,23 +15,27 @@ func main() {
 	flag.StringVar(&connectAddr, "connect_to", "127.0.0.1:7222",
 		"The address that this program connects to.")
 
-	var filter EventFilter
-	filter = IDEFilter{}
-
 	w, err := watcher.NewRecWatcher()
 	levlog.F(err)
 	if w == nil {
 		levlog.Fatal("Error creating Watcher")
 	}
 	levlog.Info(w)
-	levlog.F(w.Add(`..`))
-	levlog.F(w.Remove(`.`))
-	//levlog.F(w.Remove(`C:\Users\dailing\go\pkg`))
-	//levlog.F(w.Remove(`C:\Users\dailing\go\src`))
+	levlog.F(w.Add(`.`))
+	//levlog.F(w.Remove(`.`))
 
-	events := filter.Filter(w.Events)
+	events := w.Events
+	done := make(chan int, 1)
+	go func() {
+		time.Sleep(time.Second * 1)
+		levlog.Info("Closing")
+		w.Close()
+		done <- 0
+	}()
 	for {
 		select {
+		case <-done:
+			break
 		case e := <-events:
 			levlog.Info(e.Name)
 			levlog.Info(e.Op)

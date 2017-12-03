@@ -65,11 +65,122 @@ func (e Event) String() string {
 	return fmt.Sprintf("%q: %s", e.Name, e.Op.String())
 }
 
-// add rec add
+// Called when a event happened, if return True, then continue process this event
+// If return False, ignore this event.
+type EventFilter interface {
+	Filter(events Event) bool
+}
+
+// Called when add or remove dir to watch list
+type ListAlterHook interface {
+	OnAddFile(name string, isDir bool)
+	OnRemoveFile(name string, isDir bool)
+}
+
+// RecWatcher
 type RecWatcher struct {
-	watcher *Watcher
-	Events  chan Event
-	Errors  chan error
+	watcher  *Watcher
+	Events   chan Event
+	Errors   chan error
+	filters  []EventFilter
+	hooks    []ListAlterHook
+	watchMap map[string]bool
+	stop     chan struct{}
+}
+
+func NewRecWatcher() (*RecWatcher, error) {
+	watcher, err := NewWatcher()
+	levlog.E(err)
+
+	recWatcher := &RecWatcher{
+		watcher:  watcher,
+		Events:   make(chan Event, 50),
+		Errors:   watcher.Errors,
+		filters:  make([]EventFilter, 0),
+		hooks:    make([]ListAlterHook, 0),
+		watchMap: make(map[string]bool),
+		stop:     make(chan struct{}, 1),
+	}
+	recWatcher.AddFilter(recWatcher)
+	recWatcher.AddHook(recWatcher)
+	go recWatcher.handleEvents()
+	return recWatcher, err
+}
+
+// this should be run in go-routine
+func (rw *RecWatcher) handleEvents() {
+	stop := false
+	for {
+		if stop {
+			break
+		}
+		select {
+		case event := <-rw.watcher.Events:
+			pass := true
+			for _, f := range rw.filters {
+				if !f.Filter(event) {
+					pass = false
+					break
+				}
+			}
+			if pass {
+				select {
+				case <-rw.stop:
+					stop = true
+					break
+				case rw.Events <- event:
+					break
+				}
+			}
+		case <-rw.stop:
+			stop = true
+			break
+		}
+	}
+}
+
+// Fix new sub dir problem
+func (rw *RecWatcher) Filter(event Event) bool {
+	if ok, _ := rw.watchMap[event.Name]; ok {
+		if event.Op&Remove == Remove {
+			rw.Remove(event.Name)
+			return true
+		}
+	} else {
+		if event.Op&Create == Create {
+			state, err := os.Stat(event.Name)
+			if err != nil {
+				levlog.E(err)
+				return true
+			}
+			if state.IsDir() {
+				rw.Add(event.Name)
+			}
+		}
+	}
+	return true
+}
+
+func (rw *RecWatcher) OnAddFile(name string, isDir bool) {
+	if isDir {
+		rw.watchMap[name] = true
+	}
+}
+
+func (rw *RecWatcher) OnRemoveFile(name string, isDir bool) {
+	if isDir {
+		delete(rw.watchMap, name)
+	}
+}
+
+func (rw *RecWatcher) AddFilter(filter EventFilter) {
+	rw.filters = append(rw.filters, filter)
+}
+
+func (rw *RecWatcher) AddHook(hook ListAlterHook) {
+	if hook != nil {
+		rw.hooks = append(rw.hooks, hook)
+	}
 }
 
 func (rw *RecWatcher) Add(name string) error {
@@ -78,6 +189,16 @@ func (rw *RecWatcher) Add(name string) error {
 	if err != nil {
 		return err
 	}
+
+	fi, err := os.Stat(name)
+	if err != nil {
+		levlog.E(err)
+		return err
+	}
+	if !fi.IsDir() {
+		rw.watcher.Add(name)
+	}
+
 	err = filepath.Walk(name, func(path string, f os.FileInfo, err error) error {
 		if err != nil {
 			levlog.E(err)
@@ -105,7 +226,10 @@ func (rw *RecWatcher) Add(name string) error {
 }
 
 func (rw *RecWatcher) Close() error {
-	return rw.Close()
+	defer close(rw.Events)
+	rw.stop <- struct{}{}
+	levlog.Info("sent stop signal")
+	return rw.watcher.Close()
 }
 
 func (rw *RecWatcher) Remove(name string) error {
@@ -127,6 +251,7 @@ func (rw *RecWatcher) Remove(name string) error {
 		levlog.E(err)
 		return err
 	}
+
 	for _, fileName := range fileList {
 		if err := rw.watcher.Remove(fileName); err != nil {
 			levlog.E(err)
@@ -134,15 +259,6 @@ func (rw *RecWatcher) Remove(name string) error {
 		}
 	}
 	return nil
-}
-
-func NewRecWatcher() (*RecWatcher, error) {
-	watcher, err := NewWatcher()
-	return &RecWatcher{
-		watcher: watcher,
-		Events:  watcher.Events,
-		Errors:  watcher.Errors,
-	}, err
 }
 
 // Common errors that can be reported by a watcher
