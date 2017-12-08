@@ -71,19 +71,12 @@ type EventFilter interface {
 	Filter(events Event) bool
 }
 
-// Called when add or remove dir to watch list
-type ListAlterHook interface {
-	OnAddFile(name string, isDir bool)
-	OnRemoveFile(name string, isDir bool)
-}
-
 // RecWatcher
 type RecWatcher struct {
 	watcher  *Watcher
 	Events   chan Event
 	Errors   chan error
 	filters  []EventFilter
-	hooks    []ListAlterHook
 	watchMap map[string]bool
 	stop     chan struct{}
 }
@@ -97,12 +90,10 @@ func NewRecWatcher() (*RecWatcher, error) {
 		Events:   make(chan Event, 50),
 		Errors:   watcher.Errors,
 		filters:  make([]EventFilter, 0),
-		hooks:    make([]ListAlterHook, 0),
 		watchMap: make(map[string]bool),
 		stop:     make(chan struct{}, 1),
 	}
 	recWatcher.AddFilter(recWatcher)
-	recWatcher.AddHook(recWatcher)
 	go recWatcher.handleEvents()
 	return recWatcher, err
 }
@@ -110,10 +101,7 @@ func NewRecWatcher() (*RecWatcher, error) {
 // this should be run in go-routine
 func (rw *RecWatcher) handleEvents() {
 	stop := false
-	for {
-		if stop {
-			break
-		}
+	for !stop {
 		select {
 		case event := <-rw.watcher.Events:
 			pass := true
@@ -132,6 +120,7 @@ func (rw *RecWatcher) handleEvents() {
 					break
 				}
 			}
+
 		case <-rw.stop:
 			stop = true
 			break
@@ -143,7 +132,7 @@ func (rw *RecWatcher) handleEvents() {
 func (rw *RecWatcher) Filter(event Event) bool {
 	if ok, _ := rw.watchMap[event.Name]; ok {
 		if event.Op&Remove == Remove {
-			rw.Remove(event.Name)
+			delete(rw.watchMap, event.Name)
 			return true
 		}
 	} else {
@@ -161,26 +150,8 @@ func (rw *RecWatcher) Filter(event Event) bool {
 	return true
 }
 
-func (rw *RecWatcher) OnAddFile(name string, isDir bool) {
-	if isDir {
-		rw.watchMap[name] = true
-	}
-}
-
-func (rw *RecWatcher) OnRemoveFile(name string, isDir bool) {
-	if isDir {
-		delete(rw.watchMap, name)
-	}
-}
-
 func (rw *RecWatcher) AddFilter(filter EventFilter) {
 	rw.filters = append(rw.filters, filter)
-}
-
-func (rw *RecWatcher) AddHook(hook ListAlterHook) {
-	if hook != nil {
-		rw.hooks = append(rw.hooks, hook)
-	}
 }
 
 func (rw *RecWatcher) Add(name string) error {
@@ -221,6 +192,7 @@ func (rw *RecWatcher) Add(name string) error {
 			levlog.E(err)
 			return err
 		}
+		rw.watchMap[fileName] = true
 	}
 	return nil
 }

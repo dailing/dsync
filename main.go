@@ -35,7 +35,7 @@ func main() {
 	for {
 		select {
 		case <-done:
-			break
+			return
 		case e := <-events:
 			levlog.Info(e.Name)
 			levlog.Info(e.Op)
