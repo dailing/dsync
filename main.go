@@ -4,8 +4,17 @@ import (
 	"flag"
 	watcher "github.com/dailing/dsync/fsnotify"
 	"github.com/dailing/levlog"
-	"time"
+	"os"
+	"os/signal"
+	"syscall"
+	"github.com/dailing/dsync/fsstatus"
 )
+
+// TODO make sql table to record files
+// file path, local,abs ...
+// file hash, part hash ...
+// altered time.
+// Use github.com/monmohan/xferspdy to get binary patch sys.
 
 func main() {
 	var listenPort int64
@@ -15,6 +24,10 @@ func main() {
 	flag.StringVar(&connectAddr, "connect_to", "127.0.0.1:7222",
 		"The address that this program connects to.")
 
+	// TODO test this
+	fss := fsstatus.NewFileStatus()
+	levlog.Trace(fss)
+
 	w, err := watcher.NewRecWatcher()
 	levlog.F(err)
 	if w == nil {
@@ -22,19 +35,15 @@ func main() {
 	}
 	levlog.Info(w)
 	levlog.F(w.Add(`.`))
-	//levlog.F(w.Remove(`.`))
 
 	events := w.Events
-	done := make(chan int, 1)
-	go func() {
-		time.Sleep(time.Second * 1)
-		levlog.Info("Closing")
-		w.Close()
-		done <- 0
-	}()
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT)
 	for {
 		select {
-		case <-done:
+		case <-sig:
+			levlog.Info("Exiting...")
+			w.Close()
 			return
 		case e := <-events:
 			levlog.Info(e.Name)
