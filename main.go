@@ -16,6 +16,9 @@ import (
 // altered time.
 // Use github.com/monmohan/xferspdy to get binary patch sys.
 
+const DB_NAME = "FsStatus.db"
+
+
 func main() {
 	var listenPort int64
 	var connectAddr string
@@ -25,8 +28,11 @@ func main() {
 		"The address that this program connects to.")
 
 	// TODO test this
-	fss := fsstatus.NewFileStatus()
+	fss := fsstatus.NewFileStatus(DB_NAME)
+	levlog.E(fss.CreateRootEntry(`C:\User\d\go`))
+	levlog.E(fss.CreateOrUpdate(`C:\User\d\go\adf\sfda`))
 	levlog.Trace(fss)
+	return
 
 	w, err := watcher.NewRecWatcher()
 	levlog.F(err)
@@ -41,8 +47,9 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT)
 	for {
 		select {
-		case <-sig:
+		case s := <-sig:
 			levlog.Info("Exiting...")
+			levlog.Info(s.String())
 			w.Close()
 			return
 		case e := <-events:

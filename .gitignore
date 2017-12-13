@@ -12,3 +12,6 @@
 
 .idea
 .vendor
+
+# sqlite files
+*.db
