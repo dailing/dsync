@@ -9,11 +9,13 @@ package fsnotify
 
 import (
 	"bytes"
+	"container/heap"
 	"errors"
 	"fmt"
 	"github.com/dailing/levlog"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Event represents a single file system notification.
@@ -69,6 +71,90 @@ func (e Event) String() string {
 // If return False, ignore this event.
 type EventFilter interface {
 	Filter(events Event) bool
+}
+
+// Define the delayed filter
+type Item struct {
+	value    string
+	priority time.Duration
+	index    int // The index of the item in the heap.
+}
+
+// A PriorityQueue implements heap.Interface and holds Items.
+type PriorityQueue []*Item
+
+func (pq PriorityQueue) Len() int { return len(pq) }
+
+func (pq PriorityQueue) Less(i, j int) bool {
+	return pq[i].priority < pq[j].priority
+}
+
+func (pq PriorityQueue) Swap(i, j int) {
+	pq[i], pq[j] = pq[j], pq[i]
+	pq[i].index = i
+	pq[j].index = j
+}
+
+func (pq *PriorityQueue) Push(x interface{}) {
+	n := len(*pq)
+	item := x.(*Item)
+	item.index = n
+	*pq = append(*pq, item)
+}
+
+func (pq *PriorityQueue) Pop() interface{} {
+	old := *pq
+	n := len(old)
+	item := old[n-1]
+	item.index = -1 // for safety
+	*pq = old[0: n-1]
+	return item
+}
+
+// update modifies the priority and value of an Item in the queue.
+func (pq *PriorityQueue) update(item *Item, value string, priority time.Duration) {
+	item.value = value
+	item.priority = priority
+	heap.Fix(pq, item.index)
+}
+
+type DelayedFilter struct {
+	delayTime     time.Duration
+	stalledEvents map[string]Event
+	pq            PriorityQueue
+	fireEvent     chan string
+	newTimer      chan time.Duration
+}
+
+func NewDeleyedFilter(duration time.Duration) *DelayedFilter {
+	df := &DelayedFilter{
+		delayTime:     duration,
+		stalledEvents: make(map[string]Event),
+		pq:            make([]*Item, 0),
+		fireEvent:     make(chan string, 5),
+		newTimer:      make(chan time.Duration),
+	}
+	return df
+}
+
+func (df *DelayedFilter) StartTimer() {
+	go func() {
+		timeToSleep := 0
+		for {
+			select {
+			case <-df.newTimer:
+				df.pq.Push(timeToSleep)
+			case <-time.NewTimer(time.Second).C:
+				levlog.Trace("timer")
+			}
+		}
+	}()
+}
+
+func (df *DelayedFilter) Filter(event Event) bool {
+	if ok, e := df.stalledEvents[event.Name]; ok {
+	}
+	return true
 }
 
 // RecWatcher
@@ -225,6 +311,7 @@ func (rw *RecWatcher) Remove(name string) error {
 	}
 
 	for _, fileName := range fileList {
+		delete(rw.watchMap, fileName)
 		if err := rw.watcher.Remove(fileName); err != nil {
 			levlog.E(err)
 			return err
