@@ -70,7 +70,7 @@ func (e Event) String() string {
 // Called when a event happened, if return True, then continue process this event
 // If return False, ignore this event.
 type EventFilter interface {
-	Filter(events Event) bool
+	Filter(*chan Event) *chan Event
 }
 
 // Define the delayed filter
@@ -107,7 +107,7 @@ func (pq *PriorityQueue) Pop() interface{} {
 	n := len(old)
 	item := old[n-1]
 	item.index = -1 // for safety
-	*pq = old[0: n-1]
+	*pq = old[0 : n-1]
 	return item
 }
 
@@ -137,34 +137,30 @@ func NewDeleyedFilter(duration time.Duration) *DelayedFilter {
 	return df
 }
 
-func (df *DelayedFilter) StartTimer() {
+func (df *DelayedFilter) Filter(event *chan Event) *chan Event {
+	newEventChan := make(chan Event)
 	go func() {
-		timeToSleep := 0
+		timer := time.NewTimer(time.Hour)
 		for {
 			select {
-			case <-df.newTimer:
-				df.pq.Push(timeToSleep)
-			case <-time.NewTimer(time.Second).C:
-				levlog.Trace("timer")
+			case du := <-df.newTimer:
+				//df.pq.Push()
+				// TODO fix this
+				timer.Reset(du)
 			}
 		}
 	}()
-}
-
-func (df *DelayedFilter) Filter(event Event) bool {
-	if ok, e := df.stalledEvents[event.Name]; ok {
-	}
-	return true
+	return &newEventChan
 }
 
 // RecWatcher
 type RecWatcher struct {
-	watcher  *Watcher
-	Events   chan Event
-	Errors   chan error
-	filters  []EventFilter
-	watchMap map[string]bool
-	stop     chan struct{}
+	watcher              *Watcher
+	Events               chan Event
+	Errors               chan error
+	lastEventAfterFilter *chan Event
+	watchMap             map[string]bool
+	stop                 chan struct{}
 }
 
 func NewRecWatcher() (*RecWatcher, error) {
@@ -172,12 +168,12 @@ func NewRecWatcher() (*RecWatcher, error) {
 	levlog.E(err)
 
 	recWatcher := &RecWatcher{
-		watcher:  watcher,
-		Events:   make(chan Event, 50),
-		Errors:   watcher.Errors,
-		filters:  make([]EventFilter, 0),
-		watchMap: make(map[string]bool),
-		stop:     make(chan struct{}, 1),
+		watcher:              watcher,
+		Events:               make(chan Event, 50),
+		Errors:               watcher.Errors,
+		watchMap:             make(map[string]bool),
+		stop:                 make(chan struct{}, 1),
+		lastEventAfterFilter: &watcher.Events,
 	}
 	recWatcher.AddFilter(recWatcher)
 	go recWatcher.handleEvents()
@@ -189,24 +185,8 @@ func (rw *RecWatcher) handleEvents() {
 	stop := false
 	for !stop {
 		select {
-		case event := <-rw.watcher.Events:
-			pass := true
-			for _, f := range rw.filters {
-				if !f.Filter(event) {
-					pass = false
-					break
-				}
-			}
-			if pass {
-				select {
-				case <-rw.stop:
-					stop = true
-					break
-				case rw.Events <- event:
-					break
-				}
-			}
-
+		case event := <-*rw.lastEventAfterFilter:
+			rw.Events <- event
 		case <-rw.stop:
 			stop = true
 			break
@@ -215,29 +195,39 @@ func (rw *RecWatcher) handleEvents() {
 }
 
 // Fix new sub dir problem
-func (rw *RecWatcher) Filter(event Event) bool {
-	if ok, _ := rw.watchMap[event.Name]; ok {
-		if event.Op&Remove == Remove {
-			delete(rw.watchMap, event.Name)
-			return true
-		}
-	} else {
-		if event.Op&Create == Create {
-			state, err := os.Stat(event.Name)
-			if err != nil {
-				levlog.E(err)
-				return true
+func (rw *RecWatcher) Filter(eventChain *chan Event) *chan Event {
+	newChan := make(chan Event, 0)
+	go func() {
+		for {
+			event := <-*eventChain
+			levlog.Trace("Default Filter, get event:  ", event)
+			if ok, _ := rw.watchMap[event.Name]; ok {
+				if event.Op&Remove == Remove {
+					delete(rw.watchMap, event.Name)
+					break
+				}
+			} else {
+				if event.Op&Create == Create {
+					state, err := os.Stat(event.Name)
+					if err != nil {
+						levlog.E(err)
+						break
+					}
+					if state.IsDir() {
+						rw.Add(event.Name)
+					}
+				}
 			}
-			if state.IsDir() {
-				rw.Add(event.Name)
-			}
+			newChan <- event
 		}
-	}
-	return true
+	}()
+	return &newChan
 }
 
 func (rw *RecWatcher) AddFilter(filter EventFilter) {
-	rw.filters = append(rw.filters, filter)
+	rw.stop <- struct{}{}
+	rw.lastEventAfterFilter = filter.Filter(rw.lastEventAfterFilter)
+	go rw.handleEvents()
 }
 
 func (rw *RecWatcher) Add(name string) error {

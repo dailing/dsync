@@ -16,6 +16,7 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/dailing/levlog"
 	"golang.org/x/sys/unix"
 )
 
@@ -169,6 +170,11 @@ type watch struct {
 
 // readEvents reads from the inotify file descriptor, converts the
 // received events into Event objects and sends them via the Events channel
+/* TODO tested with rm -r and mkdir -p, only on event tested in these changed
+	To reproduce it:
+		> mkdir -p a/b/c/d/e
+		> rm -r a
+ */
 func (w *Watcher) readEvents() {
 	var (
 		buf   [unix.SizeofInotifyEvent * 4096]byte // Buffer for a maximum of 4096 raw events
@@ -260,6 +266,7 @@ func (w *Watcher) readEvents() {
 			// the "paths" map.
 			w.mu.Lock()
 			name, ok := w.paths[int(raw.Wd)]
+			levlog.Trace("Get Event from:", raw.Wd,"|", name,"|", ok)
 			// IN_DELETE_SELF occurs when the file/directory being watched is removed.
 			// This is a sign to clean up the maps, otherwise we are no longer in sync
 			// with the inotify kernel state which has already deleted the watch
@@ -286,6 +293,8 @@ func (w *Watcher) readEvents() {
 				case <-w.done:
 					return
 				}
+			} else {
+				levlog.Trace("Ignored event:", event)
 			}
 
 			// Move to the next event in the buffer

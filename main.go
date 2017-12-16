@@ -29,10 +29,10 @@ func main() {
 
 	// TODO test this
 	fss := fsstatus.NewFileStatus(DB_NAME)
-	levlog.E(fss.CreateRootEntry(`C:\User\d\go`))
-	levlog.E(fss.CreateOrUpdate(`C:\User\d\go\adf\sfda`))
+	////levlog.E(fss.CreateRootEntry(`C:\User\d\go`))
+	////levlog.E(fss.CreateOrUpdate(`C:\User\d\go\adf\sfda`))
 	levlog.Trace(fss)
-	return
+	//return
 
 	w, err := watcher.NewRecWatcher()
 	levlog.F(err)
