@@ -6,7 +6,48 @@
 
 package fsnotify
 
-import "testing"
+import (
+	"math/rand"
+	"testing"
+	"time"
+)
+
+func TestEvent_Combine(t *testing.T) {
+	e1 := Event{
+		Name: "a",
+		Op:   Create,
+	}
+	e1.Combine(Event{
+		Name: "a",
+		Op:   Write,
+	})
+	if e1.Op != Create|Write {
+		t.Errorf("Combine Not Currect, expect %s, Got %d",
+			(Create | Write).String(),
+			e1.Op.String())
+	}
+}
+
+func TestPriorityQueue_Len(t *testing.T) {
+	var pq = NewPriorityQueue()
+	now := time.Now()
+	for i := 0; i < 100; i++ {
+		pq.PushItem(Item{
+			priority: now.Add(time.Duration(rand.Int31())),
+		})
+	}
+	prevItem := pq.PopItem()
+	for pq.Len() > 0 {
+		itemt := pq.Front()
+		item := pq.PopItem()
+		if itemt.priority != item.priority {
+			t.Errorf("Error: priority queue ")
+		}
+		if prevItem.priority.After(item.priority) {
+			t.Errorf("Error: priority queue ")
+		}
+	}
+}
 
 func TestEventStringWithValue(t *testing.T) {
 	for opMask, expectedString := range map[Op]string{

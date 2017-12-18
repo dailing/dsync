@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/dailing/levlog"
+	"github.com/ryanuber/go-glob"
 	"os"
 	"path/filepath"
 	"time"
@@ -67,8 +68,11 @@ func (e Event) String() string {
 	return fmt.Sprintf("%q: %s", e.Name, e.Op.String())
 }
 
-// Called when a event happened, if return True, then continue process this event
-// If return False, ignore this event.
+func (e *Event) Combine(e2 Event) {
+	e.Op |= e2.Op
+}
+
+// Filter the events
 type EventFilter interface {
 	Filter(*chan Event) *chan Event
 }
@@ -76,17 +80,22 @@ type EventFilter interface {
 // Define the delayed filter
 type Item struct {
 	value    string
-	priority time.Duration
+	priority time.Time
 	index    int // The index of the item in the heap.
 }
 
 // A PriorityQueue implements heap.Interface and holds Items.
 type PriorityQueue []*Item
 
+func NewPriorityQueue() *PriorityQueue {
+	pq := make(PriorityQueue, 0)
+	heap.Init(&pq)
+	return &pq
+}
 func (pq PriorityQueue) Len() int { return len(pq) }
 
 func (pq PriorityQueue) Less(i, j int) bool {
-	return pq[i].priority < pq[j].priority
+	return pq[i].priority.Before(pq[j].priority)
 }
 
 func (pq PriorityQueue) Swap(i, j int) {
@@ -101,6 +110,14 @@ func (pq *PriorityQueue) Push(x interface{}) {
 	item.index = n
 	*pq = append(*pq, item)
 }
+func (pq *PriorityQueue) PushItem(x Item) {
+	heap.Push(pq, &x)
+}
+
+func (pq *PriorityQueue) PopItem() Item {
+	item := heap.Pop(pq).(*Item)
+	return *item
+}
 
 func (pq *PriorityQueue) Pop() interface{} {
 	old := *pq
@@ -112,41 +129,127 @@ func (pq *PriorityQueue) Pop() interface{} {
 }
 
 // update modifies the priority and value of an Item in the queue.
-func (pq *PriorityQueue) update(item *Item, value string, priority time.Duration) {
+func (pq *PriorityQueue) update(item *Item, value string, priority time.Time) {
 	item.value = value
 	item.priority = priority
 	heap.Fix(pq, item.index)
 }
 
+func (pq *PriorityQueue) Front() *Item {
+	return (*pq)[0]
+}
+
 type DelayedFilter struct {
 	delayTime     time.Duration
 	stalledEvents map[string]Event
-	pq            PriorityQueue
+	issueTime     map[string]time.Time
+	pq            *PriorityQueue
 	fireEvent     chan string
-	newTimer      chan time.Duration
 }
 
 func NewDeleyedFilter(duration time.Duration) *DelayedFilter {
+	levlog.Trace("Create Delayed Filter")
 	df := &DelayedFilter{
 		delayTime:     duration,
 		stalledEvents: make(map[string]Event),
-		pq:            make([]*Item, 0),
+		issueTime:     make(map[string]time.Time),
+		pq:            NewPriorityQueue(),
 		fireEvent:     make(chan string, 5),
-		newTimer:      make(chan time.Duration),
 	}
 	return df
 }
 
-func (df *DelayedFilter) Filter(event *chan Event) *chan Event {
+func (df *DelayedFilter) Filter(cevent *chan Event) *chan Event {
+	levlog.Trace("Starting Delayed filter")
 	newEventChan := make(chan Event)
 	go func() {
-		timer := time.NewTimer(time.Hour)
+		levlog.Trace("Running filter process")
+		currentTimeOutTime := time.Now().Add(time.Hour)
+		timer := time.NewTimer(currentTimeOutTime.Sub(time.Now()))
 		for {
 			select {
-			case du := <-df.newTimer:
-				//df.pq.Push()
-				// TODO fix this
-				timer.Reset(du)
+			case event := <-*cevent:
+				levlog.Trace("Received %v", event)
+				newEventAt := time.Now().Add(df.delayTime)
+				df.pq.PushItem(Item{
+					value:    event.Name,
+					priority: newEventAt,
+				})
+				// reset timer to current timeout
+				if currentTimeOutTime.After(newEventAt) {
+					timer.Reset(newEventAt.Sub(time.Now()))
+					currentTimeOutTime = newEventAt
+				}
+				// set new issue time
+				if lTime, ok := df.issueTime[event.Name]; !ok || newEventAt.After(lTime) {
+					df.issueTime[event.Name] = newEventAt
+				}
+				// Combine the event Op code
+				event.Combine(df.stalledEvents[event.Name])
+				df.stalledEvents[event.Name] = event
+			case cTime := <-timer.C:
+				levlog.Trace("Timeout")
+				// TODO handle time event and read from pq, issue event when necessary
+				if df.pq.Len() > 0 {
+					for df.pq.Len() > 0 && !df.pq.Front().priority.After(cTime) {
+						item := df.pq.PopItem()
+						levlog.Trace("Len %d, item %v", df.pq.Len(), item)
+						if !df.issueTime[item.value].After(cTime) &&
+							!(df.stalledEvents[item.value].Op&(Create|Remove) == (Create | Remove)) {
+							levlog.Tracef("DeleyedFilter, issue %s", df.stalledEvents[item.value])
+							newEventChan <- df.stalledEvents[item.value]
+							delete(df.stalledEvents, item.value)
+						}
+					}
+					if df.pq.Len() > 0 {
+						timer = time.NewTimer(df.pq.Front().priority.Sub(cTime))
+						break
+					}
+				}
+				// Nothing in queue, than no thing in the stalled map.
+				timer = time.NewTimer(time.Hour)
+			}
+		}
+	}()
+	return &newEventChan
+}
+
+type PatternFilter struct {
+	ignorePatterns []string
+	newPatternChan chan string
+}
+
+func NewPatternFilter() *PatternFilter {
+	return &PatternFilter{
+		ignorePatterns: make([]string, 0),
+		newPatternChan: make(chan string),
+	}
+}
+
+func (pf *PatternFilter) AddIgnore(s string) {
+	select {
+	case pf.newPatternChan <- s:
+	default:
+		pf.ignorePatterns = append(pf.ignorePatterns, s)
+	}
+}
+
+func (pf *PatternFilter) Filter(cevent *chan Event) *chan Event {
+	newEventChan := make(chan Event, 10)
+	go func() {
+		for {
+			select {
+			case event := <-*cevent:
+				block := false
+				for _, p := range pf.ignorePatterns {
+					if glob.Glob(p, event.Name) {
+						block = true
+						break
+					}
+				}
+				if !block {
+					newEventChan <- event
+				}
 			}
 		}
 	}()
@@ -176,6 +279,15 @@ func NewRecWatcher() (*RecWatcher, error) {
 		lastEventAfterFilter: &watcher.Events,
 	}
 	recWatcher.AddFilter(recWatcher)
+	ignoreFilter := NewPatternFilter()
+	ignoreFilter.AddIgnore("*.idea/*")
+	ignoreFilter.AddIgnore("*.idea")
+	ignoreFilter.AddIgnore("*.git")
+	ignoreFilter.AddIgnore("*.git/*")
+	ignoreFilter.AddIgnore("*.idea\\*")
+	ignoreFilter.AddIgnore("*.git\\*")
+	recWatcher.AddFilter(ignoreFilter)
+	recWatcher.AddFilter(NewDeleyedFilter(time.Millisecond * 100))
 	go recWatcher.handleEvents()
 	return recWatcher, err
 }
@@ -185,8 +297,7 @@ func (rw *RecWatcher) handleEvents() {
 	stop := false
 	for !stop {
 		select {
-		case event := <-*rw.lastEventAfterFilter:
-			rw.Events <- event
+		case rw.Events <- <-*rw.lastEventAfterFilter:
 		case <-rw.stop:
 			stop = true
 			break
@@ -196,7 +307,8 @@ func (rw *RecWatcher) handleEvents() {
 
 // Fix new sub dir problem
 func (rw *RecWatcher) Filter(eventChain *chan Event) *chan Event {
-	newChan := make(chan Event, 0)
+	levlog.Trace("Starting default filter")
+	newChan := make(chan Event)
 	go func() {
 		for {
 			event := <-*eventChain
@@ -225,9 +337,7 @@ func (rw *RecWatcher) Filter(eventChain *chan Event) *chan Event {
 }
 
 func (rw *RecWatcher) AddFilter(filter EventFilter) {
-	rw.stop <- struct{}{}
 	rw.lastEventAfterFilter = filter.Filter(rw.lastEventAfterFilter)
-	go rw.handleEvents()
 }
 
 func (rw *RecWatcher) Add(name string) error {

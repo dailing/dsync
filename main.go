@@ -3,11 +3,11 @@ package main
 import (
 	"flag"
 	watcher "github.com/dailing/dsync/fsnotify"
+	"github.com/dailing/dsync/fsstatus"
 	"github.com/dailing/levlog"
 	"os"
 	"os/signal"
 	"syscall"
-	"github.com/dailing/dsync/fsstatus"
 )
 
 // TODO make sql table to record files
@@ -18,10 +18,10 @@ import (
 
 const DB_NAME = "FsStatus.db"
 
-
 func main() {
 	var listenPort int64
 	var connectAddr string
+	levlog.Start(levlog.LevelInfo)
 	flag.Int64Var(&listenPort, "port", -1,
 		"This field should be set if the server has a public ip addr. The port that this program listens to.")
 	flag.StringVar(&connectAddr, "connect_to", "127.0.0.1:7222",
@@ -53,8 +53,7 @@ func main() {
 			w.Close()
 			return
 		case e := <-events:
-			levlog.Info(e.Name)
-			levlog.Info(e.Op)
+			levlog.Info(e)
 		case err := <-w.Errors:
 			levlog.Error(err)
 		}
