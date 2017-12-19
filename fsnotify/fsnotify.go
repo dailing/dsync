@@ -159,27 +159,51 @@ func NewDeleyedFilter(duration time.Duration) *DelayedFilter {
 	return df
 }
 
+type minTimer struct {
+	timer              *time.Timer
+	currentTimeOutTime time.Time
+}
+
+func (t *minTimer) after(d time.Duration) {
+	newTimeOut := time.Now().Add(d)
+	if t.currentTimeOutTime.After(newTimeOut) || t.currentTimeOutTime.Before(time.Now()) {
+		levlog.Trace("NewTime at", newTimeOut)
+		t.timer.Stop()
+		t.timer = time.NewTimer(d)
+		t.currentTimeOutTime = newTimeOut
+	}
+}
+func (t *minTimer) at(newTimeOut time.Time) {
+	if t.currentTimeOutTime.After(newTimeOut) || t.currentTimeOutTime.Before(time.Now()) {
+		levlog.Trace("NewTime at", newTimeOut)
+		t.timer.Stop()
+		t.timer = time.NewTimer(newTimeOut.Sub(time.Now()))
+		t.currentTimeOutTime = newTimeOut
+	}
+}
+
 func (df *DelayedFilter) Filter(cevent *chan Event) *chan Event {
 	levlog.Trace("Starting Delayed filter")
 	newEventChan := make(chan Event)
 	go func() {
 		levlog.Trace("Running filter process")
-		currentTimeOutTime := time.Now().Add(time.Hour)
-		timer := time.NewTimer(currentTimeOutTime.Sub(time.Now()))
+		//currentTimeOutTime := time.Now().Add(time.Second * 10)
+		timer := minTimer{
+			timer:              time.NewTimer(time.Hour),
+			currentTimeOutTime: time.Now().Add(time.Hour),
+		}
 		for {
 			select {
 			case event := <-*cevent:
+				if event.Name == "" {
+					levlog.Fatal("Empty Name")
+				}
 				levlog.Trace("Received %v", event)
 				newEventAt := time.Now().Add(df.delayTime)
 				df.pq.PushItem(Item{
 					value:    event.Name,
 					priority: newEventAt,
 				})
-				// reset timer to current timeout
-				if currentTimeOutTime.After(newEventAt) {
-					timer.Reset(newEventAt.Sub(time.Now()))
-					currentTimeOutTime = newEventAt
-				}
 				// set new issue time
 				if lTime, ok := df.issueTime[event.Name]; !ok || newEventAt.After(lTime) {
 					df.issueTime[event.Name] = newEventAt
@@ -187,29 +211,41 @@ func (df *DelayedFilter) Filter(cevent *chan Event) *chan Event {
 				// Combine the event Op code
 				event.Combine(df.stalledEvents[event.Name])
 				df.stalledEvents[event.Name] = event
-			case cTime := <-timer.C:
+				timer.after(df.delayTime)
+				// TODO FIX THIS
+				//levlog.Warning("VAL:", df.stalledEvents[event.Name])
+			case <-timer.timer.C:
+				cTime := time.Now()
 				levlog.Trace("Timeout")
-				// TODO handle time event and read from pq, issue event when necessary
-				if df.pq.Len() > 0 {
-					for df.pq.Len() > 0 && !df.pq.Front().priority.After(cTime) {
-						item := df.pq.PopItem()
-						levlog.Trace("Len %d, item %v", df.pq.Len(), item)
-						if !df.issueTime[item.value].After(cTime) &&
-							!(df.stalledEvents[item.value].Op&(Create|Remove) == (Create | Remove)) {
-							levlog.Tracef("DeleyedFilter, issue %s", df.stalledEvents[item.value])
-							newEventChan <- df.stalledEvents[item.value]
-							delete(df.stalledEvents, item.value)
-						}
-					}
-					if df.pq.Len() > 0 {
-						timer = time.NewTimer(df.pq.Front().priority.Sub(cTime))
-						break
+				// handle time event and read from pq, issue event when necessary
+				issueList := make(map[string]bool, 10)
+				for df.pq.Len() > 0 && !df.pq.Front().priority.After(cTime) {
+					item := df.pq.PopItem()
+					levlog.Tracef("Len %d, item %v", df.pq.Len(), item)
+					if !df.issueTime[item.value].After(cTime) {
+						issueList[item.value] = true
 					}
 				}
-				// Nothing in queue, than no thing in the stalled map.
-				timer = time.NewTimer(time.Hour)
+				for key, _ := range issueList {
+					levlog.Tracef("DeleyedFilter, issue %s", df.stalledEvents[key])
+					newEventChan <- df.stalledEvents[key]
+					if _, ok := df.stalledEvents[key]; !ok {
+						levlog.Error("Empty Name", key)
+					}
+					delete(df.stalledEvents, key)
+					delete(df.issueTime, key)
+				}
+				if df.pq.Len() > 0 {
+					levlog.Trace("Setting New timer")
+					timer.at(df.pq.Front().priority)
+					timer.after(df.delayTime)
+				} else {
+					// Nothing in queue, than no thing in the stalled map.
+					timer.after(time.Hour)
+				}
 			}
 		}
+		levlog.Info("Exiting ......")
 	}()
 	return &newEventChan
 }
@@ -252,6 +288,7 @@ func (pf *PatternFilter) Filter(cevent *chan Event) *chan Event {
 				}
 			}
 		}
+		levlog.Info("Exiting ......")
 	}()
 	return &newEventChan
 }
@@ -312,26 +349,27 @@ func (rw *RecWatcher) Filter(eventChain *chan Event) *chan Event {
 	go func() {
 		for {
 			event := <-*eventChain
+			newChan <- event
 			levlog.Trace("Default Filter, get event:  ", event)
 			if ok, _ := rw.watchMap[event.Name]; ok {
 				if event.Op&Remove == Remove {
 					delete(rw.watchMap, event.Name)
-					break
+					continue
 				}
 			} else {
 				if event.Op&Create == Create {
 					state, err := os.Stat(event.Name)
 					if err != nil {
 						levlog.E(err)
-						break
+						continue
 					}
 					if state.IsDir() {
 						rw.Add(event.Name)
 					}
 				}
 			}
-			newChan <- event
 		}
+		levlog.Info("Exiting .........")
 	}()
 	return &newChan
 }

@@ -18,13 +18,15 @@ func TestEvent_Combine(t *testing.T) {
 		Op:   Create,
 	}
 	e1.Combine(Event{
-		Name: "a",
-		Op:   Write,
+		Op: Write,
 	})
-	if e1.Op != Create|Write {
+	if e1.Op&(Create|Write) != (Create | Write) {
 		t.Errorf("Combine Not Currect, expect %s, Got %d",
 			(Create | Write).String(),
 			e1.Op.String())
+	}
+	if e1.Name != "a" {
+		t.Errorf("Error Name %s", e1.Name)
 	}
 }
 
@@ -35,6 +37,10 @@ func TestPriorityQueue_Len(t *testing.T) {
 		pq.PushItem(Item{
 			priority: now.Add(time.Duration(rand.Int31())),
 		})
+		pq.PushItem(Item{
+			priority: now.Add(time.Duration(rand.Int31())),
+		})
+		pq.PopItem()
 	}
 	prevItem := pq.PopItem()
 	for pq.Len() > 0 {

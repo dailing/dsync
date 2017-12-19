@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"github.com/dailing/dsync/fileTransfer"
 	watcher "github.com/dailing/dsync/fsnotify"
 	"github.com/dailing/dsync/fsstatus"
 	"github.com/dailing/levlog"
@@ -21,12 +22,23 @@ const DB_NAME = "FsStatus.db"
 func main() {
 	var listenPort int64
 	var connectAddr string
+	var mode string
 	levlog.Start(levlog.LevelInfo)
 	flag.Int64Var(&listenPort, "port", -1,
 		"This field should be set if the server has a public ip addr. The port that this program listens to.")
 	flag.StringVar(&connectAddr, "connect_to", "127.0.0.1:7222",
 		"The address that this program connects to.")
+	flag.StringVar(&mode, "mode", "server", "Server or client")
+	flag.Parse()
 
+	levlog.Info(mode)
+	sp := fileTransfer.NewSocketTransfer("  ")
+	if mode == "server" {
+		sp.ServeAt(8080)
+	} else {
+		sp.ConnectTo()
+	}
+	return
 	// TODO test this
 	fss := fsstatus.NewFileStatus(DB_NAME)
 	////levlog.E(fss.CreateRootEntry(`C:\User\d\go`))
