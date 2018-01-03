@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 // TODO make sql table to record files
@@ -23,7 +24,7 @@ func main() {
 	var listenPort int64
 	var connectAddr string
 	var mode string
-	levlog.Start(levlog.LevelInfo)
+	levlog.Start(levlog.LevelTrace)
 	flag.Int64Var(&listenPort, "port", -1,
 		"This field should be set if the server has a public ip addr. The port that this program listens to.")
 	flag.StringVar(&connectAddr, "connect_to", "127.0.0.1:7222",
@@ -34,9 +35,19 @@ func main() {
 	levlog.Info(mode)
 	sp := fileTransfer.NewSocketTransfer("  ")
 	if mode == "server" {
-		sp.ServeAt(8080)
+		sp.ServeAt(18080)
 	} else {
-		sp.ConnectTo()
+		//w, _ := watcher.NewRecWatcher()
+		c := make(chan *fileTransfer.Message)
+		cout := make(chan *fileTransfer.Message)
+		sp.ConnectTo(c, cout)
+		i := 0
+		for {
+			i += 1
+			c <- &fileTransfer.Message{FileName: "a", Cmd: "FFF", Payload: []byte("TEST!")}
+			levlog.Info("Sending", i)
+			time.Sleep(time.Second * 10)
+		}
 	}
 	return
 	// TODO test this
