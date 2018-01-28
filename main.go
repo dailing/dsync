@@ -34,19 +34,20 @@ func main() {
 
 	levlog.Info(mode)
 	sp := fileTransfer.NewSocketTransfer("  ")
+	sp.T.On(fileTransfer.RecvMsg, func(m *fileTransfer.Message) {
+		levlog.Info("Get Msg:", m.Cmd, m.FileName, string(m.Payload))
+	})
+
 	if mode == "server" {
 		sp.ServeAt(18080)
 	} else {
-		//w, _ := watcher.NewRecWatcher()
-		c := make(chan *fileTransfer.Message)
-		cout := make(chan *fileTransfer.Message)
-		sp.ConnectTo(c, cout)
+		sp.ConnectTo()
 		i := 0
 		for {
 			i += 1
-			c <- &fileTransfer.Message{FileName: "a", Cmd: "FFF", Payload: []byte("TEST!")}
+			sp.T.Fire(fileTransfer.SendMsg, &fileTransfer.Message{FileName: "a", Cmd: "FFF", Payload: []byte("TEST!")})
 			levlog.Info("Sending", i)
-			time.Sleep(time.Second * 10)
+			time.Sleep(time.Second * 3)
 		}
 	}
 	return

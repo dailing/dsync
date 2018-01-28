@@ -3,11 +3,18 @@ package fileTransfer
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
+	"github.com/dailing/dsync/trigger"
 	"github.com/dailing/levlog"
 	"io"
 	"net"
 	"strconv"
+)
+
+const (
+	RecvMsg = "__RECV_MSG__"
+	SendMsg = "__SEND_MSG__"
 )
 
 type Message struct {
@@ -17,10 +24,15 @@ type Message struct {
 }
 
 type SimpleSocketTransfer struct {
+	host string
+	T    trigger.Trigger
 }
 
 func NewSocketTransfer(host string) *SimpleSocketTransfer {
-	return &SimpleSocketTransfer{}
+	return &SimpleSocketTransfer{
+		host: host,
+		T:    trigger.New(),
+	}
 }
 
 /*
@@ -53,39 +65,48 @@ func (sp *SimpleSocketTransfer) ServeAt(port int) {
 			levlog.E(err)
 		}
 		levlog.Info("Connection from ", conn.RemoteAddr().String())
-		go MassageHandler(conn, msg)
+		go sp.MassageHandler(conn)
+		sp.T.On(SendMsg, sp.sendConn(conn))
 	}
 }
 
-func (sp *SimpleSocketTransfer) ConnectTo(inMsg, outMsg chan *Message) {
+func (sp *SimpleSocketTransfer) ConnectTo() {
 	conn, err := net.Dial("tcp", "127.0.0.1:18080")
 	if err != nil {
 		levlog.E(err)
 		return
 	}
 	levlog.Info("Connectiong to ", conn.RemoteAddr().String())
-	go MassageHandler(conn, outMsg)
-	go sendConn(inMsg, conn)
+	go sp.MassageHandler(conn)
+	sp.T.On(SendMsg, sp.sendConn(conn))
 }
 
-func sendConn(chanstr chan *Message, conn net.Conn) {
-	w := bufio.NewWriter(conn)
-	for {
-		str := <-chanstr
-		levlog.Trace("get ", str)
-
-		w.WriteString("--start--\n")                         // start of message
-		w.WriteString(fmt.Sprintf("%s\n", str.Cmd))          // cmd
-		w.WriteString(fmt.Sprintf("%d\n", len(str.Payload))) // length
-		w.WriteString(fmt.Sprintf("%s\n", str.FileName))     // file name
-		w.WriteString("--end head--\n")                      // head end
-		w.Write(str.Payload)                                 // payload
-		w.WriteString("--end--\n")                           // end of message
+func (sp *SimpleSocketTransfer) sendConn(conn net.Conn) func(str *Message) {
+	levlog.Info("registering function")
+	return func(str *Message) {
+		levlog.Info("receive message sending event")
+		w := bufio.NewWriter(conn)
+		var write = func(s string) error {
+			i, err := w.WriteString(s)
+			if i != len(s) {
+				levlog.Error("Size not correct whild sending ", s)
+				return errors.New("Size not correct while sending " + s)
+			}
+			levlog.E(err)
+			return err
+		}
+		levlog.E(write("--start--\n"))                         // start of message
+		levlog.E(write(fmt.Sprintf("%s\n", str.Cmd)))          // cmd
+		levlog.E(write(fmt.Sprintf("%d\n", len(str.Payload)))) // length
+		levlog.E(write(fmt.Sprintf("%s\n", str.FileName)))     // file name
+		levlog.E(write("--end head--\n"))                      // head end
+		levlog.E(write(string(str.Payload)))                   // payload
+		levlog.E(write("--end--\n"))                           // end of message
 		levlog.E(w.Flush())
 	}
 }
 
-func MassageHandler(conn io.Reader, msg chan *Message) {
+func (sp *SimpleSocketTransfer) MassageHandler(conn io.Reader) {
 	const (
 		IDLE     = iota
 		START
@@ -96,6 +117,7 @@ func MassageHandler(conn io.Reader, msg chan *Message) {
 		PAYLOAD
 		ERROR
 	)
+	defer levlog.Info("Exiting MassageHandler")
 	rw := bufio.NewReader(conn)
 	status := IDLE
 	var (
@@ -186,7 +208,8 @@ func MassageHandler(conn io.Reader, msg chan *Message) {
 			b, prefix, err := rw.ReadLine()
 			levlog.E(err)
 			if prefix || string(b) != "--end--" || err != nil {
-				status = IDLE
+				levlog.Error("error read str")
+				status = ERROR
 				break
 			}
 			status = IDLE
@@ -194,11 +217,12 @@ func MassageHandler(conn io.Reader, msg chan *Message) {
 			levlog.Trace("Read a file :", fileName)
 			levlog.Trace("File Len    :", length)
 			levlog.Trace("Cmd         :", cmd)
-			msg <- &Message{
+			levlog.Info("Firing msg")
+			sp.T.Fire(RecvMsg, &Message{
 				Cmd:      cmd,
 				FileName: fileName,
 				Payload:  payloadbuf.Bytes(),
-			}
+			})
 		}
 	}
 }
